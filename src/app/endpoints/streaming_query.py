@@ -42,6 +42,7 @@ from constants import DEFAULT_RAG_TOOL
 import metrics
 from metrics.utils import update_llm_token_count_from_turn
 from models.config import Action
+from models.cache_entry import CacheEntry, LLMResponse, AdditionalKwargs, ReferencedDocument
 from models.database.conversations import UserConversation
 from models.requests import QueryRequest
 from models.responses import ForbiddenResponse, UnauthorizedResponse
@@ -567,6 +568,26 @@ def _handle_heartbeat_event(chunk_id: int) -> Iterator[str]:
     )
 
 
+def build_referenced_docs(metadata_map: dict[str, dict[str, Any]]) -> list[dict[str, str | None]]:
+    """Build a list of unique referenced document dictionaries from the metadata map.
+
+    Args:
+        metadata_map: A dictionary containing metadata collected from the stream,
+                      keyed by document ID.
+
+    Returns:
+        A list of dictionaries, each with 'doc_title' and 'doc_url'.
+    """
+    referenced_docs = [
+        {
+            "doc_title": meta.get("title", "Title not available"),
+            "doc_url": meta.get("docs_url"),
+        }
+        for meta in metadata_map.values()
+        if meta.get("docs_url")
+    ]
+    return referenced_docs
+
 @router.post("/streaming_query", responses=streaming_query_responses)
 @authorize(Action.STREAMING_QUERY)
 async def streaming_query_endpoint_handler(  # pylint: disable=R0915,R0914
@@ -688,6 +709,8 @@ async def streaming_query_endpoint_handler(  # pylint: disable=R0915,R0914
                     yield event
 
             yield stream_end_event(metadata_map)
+            
+            referenced_docs_data = build_referenced_docs(metadata_map)
 
             if not is_transcripts_enabled():
                 logger.debug("Transcript collection is disabled in the configuration")
@@ -701,7 +724,7 @@ async def streaming_query_endpoint_handler(  # pylint: disable=R0915,R0914
                     query=query_request.query,
                     query_request=query_request,
                     summary=summary,
-                    rag_chunks=[],  # TODO(lucasagomes): implement rag_chunks
+                    rag_chunks=referenced_docs_data,
                     truncated=False,  # TODO(lucasagomes): implement truncation as part
                     # of quota work
                     attachments=query_request.attachments or [],
@@ -720,14 +743,26 @@ async def streaming_query_endpoint_handler(  # pylint: disable=R0915,R0914
                         query_request.query, client, model_id
                     )
 
+            referenced_documents = [ReferencedDocument(**doc) for doc in referenced_docs_data]
+            
+            llm_response_obj = LLMResponse(text=summary.llm_response)
+            if referenced_documents:
+                llm_response_obj.additional_kwargs = AdditionalKwargs(
+                    referenced_documents=referenced_documents
+                )
+            
+            cache_entry = CacheEntry(
+                query=query_request.query,
+                response=llm_response_obj,
+                provider=provider_id,
+                model=model_id,
+            )
+            
             store_conversation_into_cache(
                 configuration,
                 user_id,
                 conversation_id,
-                provider_id,
-                model_id,
-                query_request.query,
-                summary.llm_response,
+                cache_entry,
                 _skip_userid_check,
                 topic_summary,
             )

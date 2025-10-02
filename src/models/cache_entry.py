@@ -1,6 +1,21 @@
 """Model for conversation history cache entry."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import List
+
+class ReferencedDocument(BaseModel):
+    """Represents a single document referenced in an AI response."""
+    doc_title: str | None = None
+    doc_url: str | None = None
+
+class AdditionalKwargs(BaseModel):
+    """A structured model for the 'additional_kwargs' dictionary."""
+    referenced_documents: List[ReferencedDocument] = Field(default_factory=list)
+
+class LLMResponse(BaseModel):
+    """Represents the complete response, mimicking LangChain's AIMessage structure."""
+    text: str
+    additional_kwargs: AdditionalKwargs | None = None
 
 
 class CacheEntry(BaseModel):
@@ -8,13 +23,13 @@ class CacheEntry(BaseModel):
 
     Attributes:
         query: The query string
-        response: The response string
+        response: The structured AI response.
         provider: Provider identification
         model: Model identification
     """
 
     query: str
-    response: str
+    response: LLMResponse
     provider: str
     model: str
 

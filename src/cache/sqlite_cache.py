@@ -3,10 +3,11 @@
 from time import time
 
 import sqlite3
+import json
 
 from cache.cache import Cache
 from cache.cache_error import CacheError
-from models.cache_entry import CacheEntry, ConversationData
+from models.cache_entry import CacheEntry, ConversationData, LLMResponse
 from models.config import SQLiteDatabaseConfiguration
 from log import get_logger
 from utils.connection_decorator import connection
@@ -204,9 +205,12 @@ class SQLiteCache(Cache):
 
         result = []
         for conversation_entry in conversation_entries:
+            # Parse it back into an LLMResponse object
+            response_obj = LLMResponse.model_validate_json(conversation_entry[1])
+            
             cache_entry = CacheEntry(
                 query=conversation_entry[0],
-                response=conversation_entry[1],
+                response=response_obj,
                 provider=conversation_entry[2],
                 model=conversation_entry[3],
             )
@@ -237,6 +241,10 @@ class SQLiteCache(Cache):
 
         cursor = self.connection.cursor()
         current_time = time()
+        
+        # Serialize the LLMResponse object to a JSON string
+        response_json = cache_entry.response.model_dump_json(exclude_none=True)
+        
         cursor.execute(
             self.INSERT_CONVERSATION_HISTORY_STATEMENT,
             (
@@ -244,7 +252,7 @@ class SQLiteCache(Cache):
                 conversation_id,
                 current_time,
                 cache_entry.query,
-                cache_entry.response,
+                response_json,
                 cache_entry.provider,
                 cache_entry.model,
             ),

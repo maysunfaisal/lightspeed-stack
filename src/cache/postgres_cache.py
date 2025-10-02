@@ -4,7 +4,7 @@ import psycopg2
 
 from cache.cache import Cache
 from cache.cache_error import CacheError
-from models.cache_entry import CacheEntry, ConversationData
+from models.cache_entry import CacheEntry, ConversationData, LLMResponse
 from models.config import PostgreSQLDatabaseConfiguration
 from log import get_logger
 from utils.connection_decorator import connection
@@ -39,7 +39,7 @@ class PostgresCache(Cache):
             conversation_id text NOT NULL,
             created_at      timestamp NOT NULL,
             query           text,
-            response        text,
+            response        jsonb,
             provider        text,
             model           text,
             PRIMARY KEY(user_id, conversation_id, created_at)
@@ -206,9 +206,12 @@ class PostgresCache(Cache):
 
             result = []
             for conversation_entry in conversation_entries:
+                # Parse it back into an LLMResponse object
+                response_obj = LLMResponse.model_validate(conversation_entry[1])
+
                 cache_entry = CacheEntry(
                     query=conversation_entry[0],
-                    response=conversation_entry[1],
+                    response=response_obj,
                     provider=conversation_entry[2],
                     model=conversation_entry[3],
                 )
@@ -238,6 +241,9 @@ class PostgresCache(Cache):
             raise CacheError("insert_or_append: cache is disconnected")
 
         try:
+            # Serialize the LLMResponse object to a JSON string
+            response_json = cache_entry.response.model_dump_json(exclude_none=True)
+
             # the whole operation is run in one transaction
             with self.connection.cursor() as cursor:
                 cursor.execute(
@@ -246,7 +252,7 @@ class PostgresCache(Cache):
                         user_id,
                         conversation_id,
                         cache_entry.query,
-                        cache_entry.response,
+                        response_json,
                         cache_entry.provider,
                         cache_entry.model,
                     ),
