@@ -7,6 +7,7 @@ import logging
 from typing import Annotated, Any, Optional, cast
 
 from fastapi import APIRouter, Depends, Request
+from pydantic import AnyUrl, ValidationError
 from llama_stack.apis.agents.openai_responses import (
     OpenAIResponseMCPApprovalRequest,
     OpenAIResponseMCPApprovalResponse,
@@ -520,6 +521,52 @@ def parse_rag_chunks_from_responses_api(
     return rag_chunks
 
 
+def _parse_filename_metadata(
+    filename: Optional[str],
+) -> tuple[Optional[AnyUrl], Optional[str]]:
+    """
+    Parse document URL and title from a filename that may contain embedded metadata.
+
+    Llama-stack 0.3.x stores metadata in filenames with format: {uuid}::{docs_url}::{title}
+    This function extracts the URL and title from this format.
+
+    Args:
+        filename: The filename that may contain embedded metadata
+
+    Returns:
+        tuple[Optional[AnyUrl], Optional[str]]: A tuple of (doc_url, doc_title)
+            - If metadata format is detected: returns (validated_url, parsed_title)
+            - If no metadata format: returns (None, None) to indicate no parsing occurred
+    """
+    if not filename:
+        return None, None
+
+    # Check for llama-stack 0.3.x metadata format: {uuid}::{docs_url}::{title}
+    # The :: separator is used to delimit the three parts
+    parts = filename.split("::")
+    if len(parts) >= 3:
+        # Format: uuid::url::title (title may contain :: so we rejoin remaining parts)
+        docs_url_str = parts[1] if parts[1] else None
+        title = "::".join(parts[2:])  # Rejoin in case title contains ::
+        # Remove .txt extension if present (added during upload by rag-content)
+        if title and title.endswith(".txt"):
+            title = title[:-4]
+
+        # Validate and convert URL string to AnyUrl
+        validated_url: Optional[AnyUrl] = None
+        if docs_url_str and docs_url_str.startswith("http"):
+            try:
+                validated_url = AnyUrl(docs_url_str)
+            except ValidationError:
+                validated_url = None
+
+        return validated_url, title if title else None
+
+    # No metadata format detected - return None to indicate no parsing occurred
+    # The caller will use the original filename as-is
+    return None, None
+
+
 def parse_referenced_documents_from_responses_api(
     response: OpenAIResponseObject,  # pylint: disable=unused-argument
 ) -> list[ReferencedDocument]:
@@ -555,23 +602,42 @@ def parse_referenced_documents_from_responses_api(
                     filename = getattr(result, "filename", None)
                     attributes = getattr(result, "attributes", {})
 
-                # Try to get URL from attributes
+                # Try to get URL from attributes first (explicit metadata takes priority)
                 # Look for common URL fields in attributes
-                doc_url = (
+                doc_url_str = (
                     attributes.get("link")
                     or attributes.get("url")
                     or attributes.get("doc_url")
                 )
+                doc_title = attributes.get("title")
 
-                # If we have at least a filename or url
-                if filename or doc_url:
-                    # Treat empty string as None for URL to satisfy Optional[AnyUrl]
-                    final_url = doc_url if doc_url else None
-                    if (final_url, filename) not in seen_docs:
+                # Convert URL string to AnyUrl if present
+                doc_url: Optional[AnyUrl] = None
+                if doc_url_str and isinstance(doc_url_str, str):
+                    try:
+                        doc_url = AnyUrl(doc_url_str)
+                    except ValidationError:
+                        doc_url = None
+
+                # If no URL/title from attributes, try parsing from filename
+                # Llama-stack 0.3.x stores metadata in filename: {uuid}::{url}::{title}
+                if not doc_url or not doc_title:
+                    parsed_url, parsed_title = _parse_filename_metadata(filename)
+                    if not doc_url and parsed_url:
+                        doc_url = parsed_url
+                    if not doc_title:
+                        # Use parsed title if available, otherwise fall back to filename
+                        doc_title = parsed_title if parsed_title else filename
+
+                # If we have at least a title or url
+                if doc_title or doc_url:
+                    # Use string representation for deduplication
+                    url_str = str(doc_url) if doc_url else None
+                    if (url_str, doc_title) not in seen_docs:
                         documents.append(
-                            ReferencedDocument(doc_url=final_url, doc_title=filename)
+                            ReferencedDocument(doc_url=doc_url, doc_title=doc_title)
                         )
-                        seen_docs.add((final_url, filename))
+                        seen_docs.add((url_str, doc_title))
 
         # 2. Parse from message content annotations
         elif item_type == "message":
@@ -599,24 +665,50 @@ def parse_referenced_documents_from_responses_api(
                             )
 
                         if anno_type == "url_citation":
-                            # Treat empty string as None
-                            final_url = anno_url if anno_url else None
-                            if (final_url, anno_title) not in seen_docs:
+                            # Convert URL string to AnyUrl
+                            final_url: Optional[AnyUrl] = None
+                            if anno_url and isinstance(anno_url, str):
+                                try:
+                                    final_url = AnyUrl(anno_url)
+                                except ValidationError:
+                                    final_url = None
+
+                            # Try to parse metadata from title if it contains ::
+                            if anno_title and "::" in anno_title and not final_url:
+                                parsed_url, parsed_title = _parse_filename_metadata(
+                                    anno_title
+                                )
+                                if parsed_url:
+                                    final_url = parsed_url
+                                if parsed_title:
+                                    anno_title = parsed_title
+                            # Use string representation for deduplication
+                            url_str = str(final_url) if final_url else None
+                            if (url_str, anno_title) not in seen_docs:
                                 documents.append(
                                     ReferencedDocument(
                                         doc_url=final_url, doc_title=anno_title
                                     )
                                 )
-                                seen_docs.add((final_url, anno_title))
+                                seen_docs.add((url_str, anno_title))
 
                         elif anno_type == "file_citation":
-                            if (None, anno_title) not in seen_docs:
+                            # Try to parse metadata from title/filename
+                            # Llama-stack 0.3.x may embed metadata: {uuid}::{url}::{title}
+                            parsed_url, parsed_title = _parse_filename_metadata(
+                                anno_title
+                            )
+                            final_title = parsed_title if parsed_title else anno_title
+
+                            # Use string representation for deduplication
+                            url_str = str(parsed_url) if parsed_url else None
+                            if (url_str, final_title) not in seen_docs:
                                 documents.append(
                                     ReferencedDocument(
-                                        doc_url=None, doc_title=anno_title
+                                        doc_url=parsed_url, doc_title=final_title
                                     )
                                 )
-                                seen_docs.add((None, anno_title))
+                                seen_docs.add((url_str, final_title))
 
     return documents
 
