@@ -811,6 +811,7 @@ def create_agent_response_generator(  # pylint: disable=too-many-locals
             store_transcript_func=store_transcript,
             persist_user_conversation_details_func=persist_user_conversation_details,
             rag_chunks=create_rag_chunks_dict(summary),
+            referenced_documents=referenced_documents,
         )
 
     return response_generator

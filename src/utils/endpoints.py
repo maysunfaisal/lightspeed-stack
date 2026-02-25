@@ -722,6 +722,7 @@ async def cleanup_after_streaming(
     store_transcript_func: Any,
     persist_user_conversation_details_func: Any,
     rag_chunks: Optional[list[dict[str, Any]]] = None,
+    referenced_documents: Optional[list[ReferencedDocument]] = None,
 ) -> None:
     """
     Perform cleanup tasks after streaming is complete.
@@ -748,6 +749,8 @@ async def cleanup_after_streaming(
         store_transcript_func: Function to store transcript
         persist_user_conversation_details_func: Function to persist conversation details
         rag_chunks: Optional RAG chunks dict
+        referenced_documents: Pre-parsed referenced documents from the streaming response.
+            If provided, used directly instead of re-parsing from summary/metadata_map.
     """
     # Store transcript if enabled
     if not is_transcripts_enabled_func():
@@ -794,9 +797,12 @@ async def cleanup_after_streaming(
 
     completed_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    referenced_documents = create_referenced_documents_with_metadata(
-        summary, metadata_map
-    )
+    # Use pre-parsed referenced_documents if provided, otherwise fall back to
+    # parsing from summary/metadata_map for backwards compatibility
+    if referenced_documents is None:
+        referenced_documents = create_referenced_documents_with_metadata(
+            summary, metadata_map
+        )
 
     cache_entry = CacheEntry(
         query=query_request.query,

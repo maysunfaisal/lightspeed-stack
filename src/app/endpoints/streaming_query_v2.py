@@ -308,7 +308,7 @@ def create_responses_response_generator(  # pylint: disable=too-many-locals,too-
             media_type,
         )
 
-        # Perform cleanup tasks (database and cache operations))
+        # Perform cleanup tasks (database and cache operations)
         await cleanup_after_streaming(
             user_id=context.user_id,
             conversation_id=conv_id,
@@ -327,6 +327,7 @@ def create_responses_response_generator(  # pylint: disable=too-many-locals,too-
             store_transcript_func=store_transcript,
             persist_user_conversation_details_func=persist_user_conversation_details,
             rag_chunks=[rag_chunk.model_dump() for rag_chunk in rag_chunks],
+            referenced_documents=referenced_documents,
         )
 
     return response_generator
